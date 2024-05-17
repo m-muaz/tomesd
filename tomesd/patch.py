@@ -1,6 +1,7 @@
 import torch
 import math
 from typing import Type, Dict, Any, Tuple, Callable
+from einops import rearrange, repeat
 
 from . import merge
 from .utils import isinstance_str, init_generator
@@ -33,11 +34,12 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any]) -> Tuple[Callable,
     else:
         m, u = (merge.do_nothing, merge.do_nothing)
 
+    m_i, u_i = (m, u) if args["merge_in"]       else (merge.do_nothing, merge.do_nothing)
     m_a, u_a = (m, u) if args["merge_attn"]      else (merge.do_nothing, merge.do_nothing)
     m_c, u_c = (m, u) if args["merge_crossattn"] else (merge.do_nothing, merge.do_nothing)
     m_m, u_m = (m, u) if args["merge_mlp"]       else (merge.do_nothing, merge.do_nothing)
 
-    return m_a, m_c, m_m, u_a, u_c, u_m  # Okay this is probably not very good
+    return m_i, m_a, m_c, m_m, u_i, u_a, u_c, u_m # Okay this is probably not very good
 
 
 
@@ -56,7 +58,7 @@ def make_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]
         _parent = block_class
 
         def _forward(self, x: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
-            m_a, m_c, m_m, u_a, u_c, u_m = compute_merge(x, self._tome_info)
+            m_i, m_a, m_c, m_m, u_i, u_a, u_c, u_m = compute_merge(x, self._tome_info)
 
             # This is where the meat of the computation happens
             x = u_a(self.attn1(m_a(self.norm1(x)), context=context if self.disable_self_attn else None)) + x
@@ -92,7 +94,7 @@ def make_diffusers_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.
             class_labels=None,
         ) -> torch.Tensor:
             # (1) ToMe
-            m_a, m_c, m_m, u_a, u_c, u_m = compute_merge(hidden_states, self._tome_info)
+            m_i, m_a, m_c, m_m, u_i, u_a, u_c, u_m = compute_merge(hidden_states, self._tome_info)
 
             if self.use_ada_layer_norm:
                 norm_hidden_states = self.norm1(hidden_states, timestep)
@@ -159,6 +161,102 @@ def make_diffusers_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.
     return ToMeBlock
 
 
+def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]:
+    """
+    Make a patched class for a diffusers model.
+    This patch applies ToMe to the forward function of the block.
+    """
+    class ToMeTempBlock(block_class):
+        # Save for unpatching later
+        _parent = block_class
+        
+        def _forward(self, x, context=None, timesteps=None):
+            assert self.timesteps or timesteps
+            assert not (self.timesteps and timesteps) or self.timesteps == timesteps
+            timesteps = self.timesteps or timesteps
+            B, S, C = x.shape
+            b = B // timesteps
+            
+            x = rearrange(x, "(b t) s c -> b s (t c)", t=timesteps)
+            # (1) ToMe
+            m_i, m_a, m_c, m_m, u_i, u_a, u_c, u_m = compute_merge(x, self._tome_info)
+            x = rearrange(x, "b s (t c) -> (b t) s c", t=timesteps)
+            x = rearrange(x, "(b t) s c -> (b s) t c", t=timesteps)
+
+            if self.ff_in:
+                x_skip = x
+                x = self.norm_in(x)
+                x = x.reshape(b, S, timesteps * C)
+                x = m_i(x)
+                seq_length_down = x.shape[1]
+                x = x.reshape(b * seq_length_down, timesteps, C)
+                
+                x = self.ff_in(x)
+                x = x.reshape(b, seq_length_down, timesteps * C)
+                if self.is_res:
+                    x = u_i(x).reshape(b * S, timesteps, C) + x_skip
+
+            x_skip = x.clone()
+            x = self.norm1(x)
+            
+            if self.disable_self_attn:
+                x = x.reshape(b, S, timesteps * C)
+                x = m_c(x)
+                seq_length_down = x.shape[1]
+                x = x.reshape(b * seq_length_down, timesteps, C)
+                x = self.attn1(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
+                x = x.reshape(b, seq_length_down, timesteps * C)
+                x = u_c(x).reshape(b * S, timesteps, C) + x_skip
+            else:
+                x = x.reshape(b, S, timesteps * C)
+                x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
+                seq_length_down = x.shape[1]
+                x = x.reshape(b * seq_length_down, timesteps, C)
+                x = self.attn1(x)
+                x = x.reshape(b, seq_length_down, timesteps * C)
+                x = u_a(x).reshape(b * S, timesteps, C) + x_skip
+
+            x_skip = x.clone()
+            x = self.norm2(x)
+            if self.attn2 is not None:
+                if self.switch_temporal_ca_to_sa:
+                    x = x.reshape(b, S, timesteps * C)
+                    x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
+                    seq_length_down = x.shape[1]
+                    x = x.reshape(b * seq_length_down, timesteps, C)
+                    x = self.attn2(x)
+                    x = x.reshape(b, seq_length_down, timesteps * C)
+                    x = u_a(x).reshape(b * S, timesteps, C) + x_skip
+                else:
+                    x = x.reshape(b, S, timesteps * C)
+                    x = m_c(x)
+                    seq_length_down = x.shape[1]
+                    x = x.reshape(b * seq_length_down, timesteps, C)
+                    x = self.attn2(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
+                    x = x.reshape(b, seq_length_down, timesteps * C)
+                    x = u_c(x).reshape(b * S, timesteps, C) + x_skip
+            x_skip = x
+            x = self.norm3(x)
+            x = x.reshape(b, S, timesteps * C)
+            x = m_m(x)
+            seq_length_down = x.shape[1]
+            x = x.reshape(b * seq_length_down, timesteps, C)
+            x = self.ff(x)
+            x = x.reshape(b, seq_length_down, timesteps * C)
+            if self.is_res:
+                x = u_m(x).reshape(b * S, timesteps, C)
+                x = x + x_skip 
+
+            x = x[None, :].reshape(b, S, timesteps, C)
+            x = x.permute(0, 2, 1, 3)
+            x = x.reshape(b * timesteps, S, C)
+            # x = rearrange(
+            #     x, "(b s) t c -> (b t) s c", s=S, b=B // timesteps, c=C, t=timesteps
+            # )
+            return x
+
+    return ToMeTempBlock
+
 
 
 
@@ -184,8 +282,9 @@ def apply_patch(
         max_downsample: int = 1,
         sx: int = 2, sy: int = 2,
         use_rand: bool = True,
+        merge_in: bool = True,
         merge_attn: bool = True,
-        merge_crossattn: bool = False,
+        merge_crossattn: bool = True,
         merge_mlp: bool = False):
     """
     Patches a stable diffusion model with ToMe.
@@ -214,12 +313,16 @@ def apply_patch(
     remove_patch(model)
 
     is_diffusers = isinstance_str(model, "DiffusionPipeline") or isinstance_str(model, "ModelMixin")
+    
+    is_openai_wrapper = hasattr(model, "model") and isinstance_str(model.model, "OpenAIWrapper")
 
-    if not is_diffusers:
+    if not is_diffusers and not is_openai_wrapper:
         if not hasattr(model, "model") or not hasattr(model.model, "diffusion_model"):
             # Provided model not supported
             raise RuntimeError("Provided model was not a Stable Diffusion / Latent Diffusion model, as expected.")
         diffusion_model = model.model.diffusion_model
+    elif is_openai_wrapper:
+        diffusion_model = model.model.diffusion_model # Patch for code that builds on StabilityAI - generative models repo
     else:
         # Supports "pipe.unet" and "unet"
         diffusion_model = model.unet if hasattr(model, "unet") else model
@@ -233,6 +336,7 @@ def apply_patch(
             "sx": sx, "sy": sy,
             "use_rand": use_rand,
             "generator": None,
+            "merge_in": merge_in,
             "merge_attn": merge_attn,
             "merge_crossattn": merge_crossattn,
             "merge_mlp": merge_mlp
@@ -242,8 +346,15 @@ def apply_patch(
 
     for _, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
-        if isinstance_str(module, "BasicTransformerBlock"):
-            make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+        if isinstance_str(module, "VideoTransformerBlock"):
+            # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+            if is_diffusers:
+                make_tome_block_fn = make_diffusers_tome_block
+            elif is_openai_wrapper:
+                print("Patching OpenAIWrapper diffusion model")
+                make_tome_block_fn = make_generative_models_tome_block
+            else:
+                make_tome_block_fn = make_tome_block
             module.__class__ = make_tome_block_fn(module.__class__)
             module._tome_info = diffusion_model._tome_info
 
