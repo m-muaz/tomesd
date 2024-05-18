@@ -187,6 +187,7 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
                 x_skip = x
                 x = self.norm_in(x)
                 x = x.reshape(b, S, timesteps * C)
+                print("Calling m_i in generative_models_tome_block")
                 x = m_i(x)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
@@ -194,6 +195,7 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
                 x = self.ff_in(x)
                 x = x.reshape(b, seq_length_down, timesteps * C)
                 if self.is_res:
+                    print("Calling u_i in generative_models_tome_block")
                     x = u_i(x).reshape(b * S, timesteps, C) + x_skip
 
             x_skip = x.clone()
@@ -201,19 +203,23 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             
             if self.disable_self_attn:
                 x = x.reshape(b, S, timesteps * C)
+                print("Calling m_c in generative_models_tome_block after norm1")
                 x = m_c(x)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 x = self.attn1(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
                 x = x.reshape(b, seq_length_down, timesteps * C)
+                print("Calling u_c in generative_models_tome_block after norm 1")
                 x = u_c(x).reshape(b * S, timesteps, C) + x_skip
             else:
                 x = x.reshape(b, S, timesteps * C)
+                print("Calling m_a in generative_models_tome_block after norm 1")
                 x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 x = self.attn1(x)
                 x = x.reshape(b, seq_length_down, timesteps * C)
+                print("Calling u_a in generative_models_tome_block after norm 1")
                 x = u_a(x).reshape(b * S, timesteps, C) + x_skip
 
             x_skip = x.clone()
@@ -221,29 +227,35 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             if self.attn2 is not None:
                 if self.switch_temporal_ca_to_sa:
                     x = x.reshape(b, S, timesteps * C)
+                    print("Calling m_a in generative_models_tome_block after norm2")
                     x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
                     seq_length_down = x.shape[1]
                     x = x.reshape(b * seq_length_down, timesteps, C)
                     x = self.attn2(x)
                     x = x.reshape(b, seq_length_down, timesteps * C)
+                    print("Calling u_a in generative_models_tome_block")
                     x = u_a(x).reshape(b * S, timesteps, C) + x_skip
                 else:
                     x = x.reshape(b, S, timesteps * C)
+                    print("Calling m_c in generative_models_tome_block after norm2")
                     x = m_c(x)
                     seq_length_down = x.shape[1]
                     x = x.reshape(b * seq_length_down, timesteps, C)
                     x = self.attn2(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
                     x = x.reshape(b, seq_length_down, timesteps * C)
+                    print("Calling u_c in generative_models_tome_block after norm2")
                     x = u_c(x).reshape(b * S, timesteps, C) + x_skip
             x_skip = x
             x = self.norm3(x)
             x = x.reshape(b, S, timesteps * C)
+            print("Calling m_m in generative_models_tome_block after norm3 [before last ff layer]")
             x = m_m(x)
             seq_length_down = x.shape[1]
             x = x.reshape(b * seq_length_down, timesteps, C)
             x = self.ff(x)
             x = x.reshape(b, seq_length_down, timesteps * C)
             if self.is_res:
+                print("Calling u_m in generative_models_tome_block after norm3 [after last ff layer]")
                 x = u_m(x).reshape(b * S, timesteps, C)
                 x = x + x_skip 
 
