@@ -85,19 +85,19 @@ def get_frame_merge_func(hidden_states, num_frames, height, width, tome_info, en
         hidden_states = F.interpolate(hidden_states, size=[height_down, width_down], mode="area")
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_size, num_frames, height_down * width_down * channels)
         # hidden_states = hidden_states.reshape(batch_size, num_frames, seq_length * channels)
-        fm_a, _, _, fu_a, _, _ = compute_merge_temp(hidden_states, tome_info, tome_info["args"]["fm_ratio"])
+        fm_a, fm_c, fm_m, fu_a, fu_c, fu_m = compute_merge_temp(hidden_states, tome_info, tome_info["args"]["fm_ratio"])
         # hidden_states = hidden_states.reshape(batch_frames, seq_length, channels)
-        return fm_a, fu_a
+        return fm_a, fm_c, fm_m, fu_a, fu_c, fu_m
     else:
-        return merge.do_nothing, merge.do_nothing
+        return merge.do_nothing, merge.do_nothing, merge.do_nothing, merge.do_nothing, merge.do_nothing, merge.do_nothing
 
 
 def get_token_merge_func(hidden_states, tome_info, enabled=True):
     if enabled:
         _, tm_a, tm_c, tm_m, _, tu_a, tu_c, tu_m = compute_merge(hidden_states, tome_info, tome_info["args"]["tm_ratio"])
-        return tm_a, tu_a
+        return tm_a, tm_c, tm_m, tu_a, tu_c, tu_m
     else:
-        return merge.do_nothing, merge.do_nothing
+        return merge.do_nothing, merge.do_nothing, merge.do_nothing, merge.do_nothing, merge.do_nothing, merge.do_nothing
 
 
 
@@ -235,14 +235,17 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             batch_frames, seq_length, channels = x.shape
             batch_size = batch_frames // num_frames
             
+            fm_a, fm_c, fm_m, fu_a, fu_c, fu_m = get_frame_merge_func(x, num_frames, height, width, self._tome_info, enabled=True)
+            tm_a, tm_c, tm_m, tu_a, tu_c, tu_m = get_token_merge_func(x, self._tome_info, enabled=True)
+            
             norm_x = self.norm1(x)
             skip_x = x
             
             # Frame merge for self attention or cross attention
-            if self.disable_self_attn:
-                fm, fu = get_frame_merge_func(norm_x, num_frames, height, width, self._tome_info, enabled=self._tome_info["args"]["merge_crossattn"])
+            if self.disable_self_attn:  # Cross attention
+                fm, fu = fm_c, fu_c
             else:
-                fm, fu = get_frame_merge_func(norm_x, num_frames, height, width, self._tome_info, enabled=self._tome_info["args"]["merge_attn"])
+                fm, fu = fm_a, fu_a
 
             norm_x = norm_x.reshape(batch_size, num_frames, seq_length * channels)
             # print("tome block shape before frame merge ", norm_x.shape)
@@ -252,10 +255,10 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             norm_x = norm_x.reshape(batch_size * num_frames_down, seq_length, channels)
             
             # Token merge for self attention or cross attention
-            if self.disable_self_attn:
-                tm, tu = get_token_merge_func(norm_x, self._tome_info, enabled=self._tome_info["args"]["merge_crossattn"])
+            if self.disable_self_attn: # Cross attention
+                tm, tu = tm_c, tu_c
             else:
-                tm, tu = get_token_merge_func(norm_x, self._tome_info, enabled=self._tome_info["args"]["merge_attn"])
+                tm, tu = tm_a, tu_a
 
             # print("tome block shape before token merge ", norm_x.shape)
             norm_x = tm(norm_x)
@@ -281,9 +284,9 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             
             # Frame merge for self attention or cross attention
             if context is not None:
-                fm, fu = get_frame_merge_func(norm_x, num_frames, height, width, self._tome_info, enabled=self._tome_info["args"]["merge_crossattn"])
+                fm, fu = fm_c, fu_c
             else:
-                fm, fu = get_frame_merge_func(norm_x, num_frames, height, width, self._tome_info, enabled=self._tome_info["args"]["merge_attn"])
+                fm, fu = fm_a, fu_a
 
             norm_x = norm_x.reshape(batch_size, num_frames, seq_length * channels)
             norm_x = fm(norm_x)
@@ -292,16 +295,16 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             
             # Token merge for self attention or cross attention
             if context is not None:
-                tm, tu = get_token_merge_func(norm_x, self._tome_info, enabled=self._tome_info["args"]["merge_crossattn"])
+                tm, tu = tm_c, tu_c
             else:
-                tm, tu = get_token_merge_func(norm_x, self._tome_info, enabled=self._tome_info["args"]["merge_attn"])
+                tm, tu = tm_a, tu_a
             
             norm_x = tm(norm_x)
             shape = context.shape if context is not None else None
             if context is not None:
-                context_reshaped = context.reshape(batch_size, num_frames, shape[1], shape[2])[:, :num_frames_down, ...].flatten(0,1)
+                context = context.reshape(batch_size, num_frames, shape[1], shape[2])[:, :num_frames_down, ...].flatten(0,1)
             x = self.attn2(
-                    norm_x, context=context_reshaped, additional_tokens=additional_tokens
+                    norm_x, context=context, additional_tokens=additional_tokens
                 )
             # Un merge Token first and then frame
             x = tu(x)
@@ -313,15 +316,14 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             norm_x = self.norm3(x)
 
             # Frame merge for ff aka mlp
-            if context is not None:
-                fm, fu = get_frame_merge_func(norm_x, num_frames, height, width, self._tome_info, enabled=self._tome_info["args"]["merge_mlp"])
+            fm, fu = fm_m, fu_m
             norm_x = norm_x.reshape(batch_size, num_frames, seq_length * channels)
             norm_x = fm(norm_x)
             num_frames_down = norm_x.shape[1]
             norm_x = norm_x.reshape(batch_size * num_frames_down, seq_length, channels)
             
             # Token merge for ff aka mlp
-            tm, tu = get_token_merge_func(norm_x, self._tome_info, enabled=self._tome_info["args"]["merge_mlp"])
+            tm, tu = tm_m, tu_m
             norm_x = tm(norm_x)
             
             x = self.ff(norm_x)
@@ -555,7 +557,7 @@ def apply_patch(
             if is_diffusers:
                 make_tome_block_fn = make_diffusers_tome_block
             elif is_openai_wrapper:
-                print("Patching BasicTransformer module in the UNet")
+                # print("Patching BasicTransformer module in the UNet")
                 make_tome_block_fn = make_generative_models_tome_block
             else:
                 make_tome_block_fn = make_tome_block
@@ -571,12 +573,12 @@ def apply_patch(
                 module.use_ada_layer_norm = False
                 module.use_ada_layer_norm_zero = False
 
-        if isinstance_str(module, "VideoTransformerBlock"):
+        elif isinstance_str(module, "VideoTransformerBlock"):
             # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
             if is_diffusers:
                 make_tome_block_fn = make_diffusers_tome_block
             elif is_openai_wrapper:
-                print("Patching VideoTransformer Block in the UNet")
+                # print("Patching VideoTransformer Block in the UNet")
                 make_tome_block_fn = make_generative_models_tome_temp_block
             else:
                 make_tome_block_fn = make_tome_block
