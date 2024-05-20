@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import math
 from typing import Type, Dict, Any, Tuple, Callable
 from einops import rearrange, repeat
@@ -80,7 +81,7 @@ def get_frame_merge_func(hidden_states, num_frames, height, width, tome_info, en
         hidden_states = hidden_states.reshape(batch_frames, height, width, channels).permute(0, 3, 1, 2)
         # TODO: downsample spatially to save time, should not be hardcoded
         height_down = 9
-        width_down = 16
+        width_down = (width // height) * height_down 
         hidden_states = F.interpolate(hidden_states, size=[height_down, width_down], mode="area")
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_size, num_frames, height_down * width_down * channels)
         # hidden_states = hidden_states.reshape(batch_size, num_frames, seq_length * channels)
@@ -244,7 +245,9 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
                 fm, fu = get_frame_merge_func(norm_x, num_frames, height, width, self._tome_info, enabled=self._tome_info["args"]["merge_attn"])
 
             norm_x = norm_x.reshape(batch_size, num_frames, seq_length * channels)
+            # print("tome block shape before frame merge ", norm_x.shape)
             norm_x = fm(norm_x)
+            # print("tome block shape after frame merge ", norm_x.shape)
             num_frames_down = norm_x.shape[1]
             norm_x = norm_x.reshape(batch_size * num_frames_down, seq_length, channels)
             
@@ -254,7 +257,9 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             else:
                 tm, tu = get_token_merge_func(norm_x, self._tome_info, enabled=self._tome_info["args"]["merge_attn"])
 
+            # print("tome block shape before token merge ", norm_x.shape)
             norm_x = tm(norm_x)
+            # print("tome block shape after token merge ", norm_x.shape)
             
             x = self.attn1(
                     norm_x,
@@ -348,7 +353,7 @@ def make_generative_models_tome_temp_block(block_class: Type[torch.nn.Module]) -
             
             x = rearrange(x, "(b t) s c -> b s (t c)", t=timesteps)
             # (1) ToMe
-            m_i, m_a, m_c, m_m, u_i, u_a, u_c, u_m = compute_merge(x, self._tome_info)
+            m_i, m_a, m_c, m_m, u_i, u_a, u_c, u_m = compute_merge(x, self._tome_info, self._tome_info["args"]["bm_ratio"])
             x = rearrange(x, "b s (t c) -> (b t) s c", t=timesteps)
             x = rearrange(x, "(b t) s c -> (b s) t c", t=timesteps)
 
@@ -356,15 +361,17 @@ def make_generative_models_tome_temp_block(block_class: Type[torch.nn.Module]) -
                 x_skip = x
                 x = self.norm_in(x)
                 x = x.reshape(b, S, timesteps * C)
-                print("Calling m_i in generative_models_tome_block")
+                # print("Calling m_i in temp_tome_block")
+                # print("shape before ", x.shape)
                 x = m_i(x)
+                # print("shape after ", x.shape)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 
                 x = self.ff_in(x)
                 x = x.reshape(b, seq_length_down, timesteps * C)
                 if self.is_res:
-                    print("Calling u_i in generative_models_tome_block")
+                    # print("Calling u_i in generative_models_tome_block")
                     x = u_i(x).reshape(b * S, timesteps, C) + x_skip
 
             x_skip = x.clone()
@@ -372,23 +379,27 @@ def make_generative_models_tome_temp_block(block_class: Type[torch.nn.Module]) -
             
             if self.disable_self_attn:
                 x = x.reshape(b, S, timesteps * C)
-                print("Calling m_c in generative_models_tome_block after norm1")
+                # print("Calling m_c in after ff")
+                # print("shape before ", x.shape)
                 x = m_c(x)
+                # print("shape after ", x.shape)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 x = self.attn1(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
                 x = x.reshape(b, seq_length_down, timesteps * C)
-                print("Calling u_c in generative_models_tome_block after norm 1")
+                # print("Calling u_c in generative_models_tome_block after norm 1")
                 x = u_c(x).reshape(b * S, timesteps, C) + x_skip
             else:
                 x = x.reshape(b, S, timesteps * C)
-                print("Calling m_a in generative_models_tome_block after norm 1")
+                # print("Calling m_a in generative_models_tome_block after norm 1")
+                # print("shape before ", x.shape)
                 x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
+                # print("shape after ", x.shape)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 x = self.attn1(x)
                 x = x.reshape(b, seq_length_down, timesteps * C)
-                print("Calling u_a in generative_models_tome_block after norm 1")
+                # print("Calling u_a in generative_models_tome_block after norm 1")
                 x = u_a(x).reshape(b * S, timesteps, C) + x_skip
 
             x_skip = x.clone()
@@ -396,35 +407,41 @@ def make_generative_models_tome_temp_block(block_class: Type[torch.nn.Module]) -
             if self.attn2 is not None:
                 if self.switch_temporal_ca_to_sa:
                     x = x.reshape(b, S, timesteps * C)
-                    print("Calling m_a in generative_models_tome_block after norm2")
+                    # print("Calling m_a in generative_models_tome_block after norm2")
+                    # print("shape before ", x.shape)
                     x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
+                    # print("shape after ", x.shape)
                     seq_length_down = x.shape[1]
                     x = x.reshape(b * seq_length_down, timesteps, C)
                     x = self.attn2(x)
                     x = x.reshape(b, seq_length_down, timesteps * C)
-                    print("Calling u_a in generative_models_tome_block")
+                    # print("Calling u_a in generative_models_tome_block")
                     x = u_a(x).reshape(b * S, timesteps, C) + x_skip
                 else:
                     x = x.reshape(b, S, timesteps * C)
-                    print("Calling m_c in generative_models_tome_block after norm2")
+                    # print("Calling m_c in generative_models_tome_block after norm2")
+                    # print("shape before ", x.shape)
                     x = m_c(x)
+                    # print("shape after ", x.shape)
                     seq_length_down = x.shape[1]
                     x = x.reshape(b * seq_length_down, timesteps, C)
                     x = self.attn2(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
                     x = x.reshape(b, seq_length_down, timesteps * C)
-                    print("Calling u_c in generative_models_tome_block after norm2")
+                    # print("Calling u_c in generative_models_tome_block after norm2")
                     x = u_c(x).reshape(b * S, timesteps, C) + x_skip
             x_skip = x
             x = self.norm3(x)
             x = x.reshape(b, S, timesteps * C)
-            print("Calling m_m in generative_models_tome_block after norm3 [before last ff layer]")
+            # print("Calling m_m in generative_models_tome_block after norm3 [before last ff layer]")
+            # print("shape before ", x.shape)
             x = m_m(x)
+            # print("shape after ", x.shape)
             seq_length_down = x.shape[1]
             x = x.reshape(b * seq_length_down, timesteps, C)
             x = self.ff(x)
             x = x.reshape(b, seq_length_down, timesteps * C)
             if self.is_res:
-                print("Calling u_m in generative_models_tome_block after norm3 [after last ff layer]")
+                # print("Calling u_m in generative_models_tome_block after norm3 [after last ff layer]")
                 x = u_m(x).reshape(b * S, timesteps, C)
                 x = x + x_skip 
 
@@ -468,7 +485,8 @@ def apply_patch(
         merge_in: bool = True,
         merge_attn: bool = True,
         merge_crossattn: bool = True,
-        merge_mlp: bool = False):
+        merge_mlp: bool = False,
+        num_frames: int = None):
     """
     Patches a stable diffusion model with ToMe.
     Apply this to the highest level stable diffusion object (i.e., it should have a .model.diffusion_model).
@@ -512,9 +530,12 @@ def apply_patch(
 
     diffusion_model._tome_info = {
         "size": None,
+        "num_frames": num_frames,
         "hooks": [],
         "args": {
-            "ratio": ratio,
+            "fm_ratio": fm_ratio,  # frame merge ratio
+            "tm_ratio": tm_ratio,  # token merge ratio
+            "bm_ratio": bm_ratio,  # block merge ratio
             "max_downsample": max_downsample,
             "sx": sx, "sy": sy,
             "use_rand": use_rand,
@@ -529,17 +550,39 @@ def apply_patch(
 
     for _, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
+        if isinstance_str(module, "BasicTransformerBlock"):
+            # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+            if is_diffusers:
+                make_tome_block_fn = make_diffusers_tome_block
+            elif is_openai_wrapper:
+                print("Patching BasicTransformer module in the UNet")
+                make_tome_block_fn = make_generative_models_tome_block
+            else:
+                make_tome_block_fn = make_tome_block
+            module.__class__ = make_tome_block_fn(module.__class__)
+            module._tome_info = diffusion_model._tome_info
+
+            # Something introduced in SD 2.0 (LDM only)
+            if not hasattr(module, "disable_self_attn") and not is_diffusers:
+                module.disable_self_attn = False
+
+            # Something needed for older versions of diffusers
+            if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
+                module.use_ada_layer_norm = False
+                module.use_ada_layer_norm_zero = False
+
         if isinstance_str(module, "VideoTransformerBlock"):
             # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
             if is_diffusers:
                 make_tome_block_fn = make_diffusers_tome_block
             elif is_openai_wrapper:
-                print("Patching OpenAIWrapper diffusion model")
+                print("Patching VideoTransformer Block in the UNet")
                 make_tome_block_fn = make_generative_models_tome_temp_block
             else:
                 make_tome_block_fn = make_tome_block
             module.__class__ = make_tome_block_fn(module.__class__)
             module._tome_info = diffusion_model._tome_info
+            module._tome_info["args"]["merge_mlp"] = True
 
             # Something introduced in SD 2.0 (LDM only)
             if not hasattr(module, "disable_self_attn") and not is_diffusers:
