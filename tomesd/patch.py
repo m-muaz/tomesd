@@ -79,11 +79,11 @@ def get_frame_merge_func(hidden_states, num_frames, height, width, tome_info, en
         batch_frames, seq_length, channels = hidden_states.shape
         batch_size = batch_frames // num_frames
         hidden_states = hidden_states.reshape(batch_frames, height, width, channels).permute(0, 3, 1, 2)
-        # TODO: downsample spatially to save time, should not be hardcoded
-        height_down = 9
+        # # TODO: downsample spatially to save time, should not be hardcoded
+        height_down = height
         width_down = (width // height) * height_down 
         hidden_states = F.interpolate(hidden_states, size=[height_down, width_down], mode="area")
-        hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_size, num_frames, height_down * width_down * channels)
+        hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_size, num_frames, height * width * channels)
         # hidden_states = hidden_states.reshape(batch_size, num_frames, seq_length * channels)
         fm_a, fm_c, fm_m, fu_a, fu_c, fu_m = compute_merge_temp(hidden_states, tome_info, tome_info["args"]["fm_ratio"])
         # hidden_states = hidden_states.reshape(batch_frames, seq_length, channels)
@@ -235,8 +235,15 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             batch_frames, seq_length, channels = x.shape
             batch_size = batch_frames // num_frames
             
-            fm_a, fm_c, fm_m, fu_a, fu_c, fu_m = get_frame_merge_func(x, num_frames, height, width, self._tome_info, enabled=True)
-            tm_a, tm_c, tm_m, tu_a, tu_c, tu_m = get_token_merge_func(x, self._tome_info, enabled=True)
+            orig_x = x
+            x = x.reshape(batch_size, num_frames, seq_length * channels)
+            fm_a, fm_c, fm_m, fu_a, fu_c, fu_m = compute_merge_temp(x, self._tome_info, self._tome_info["args"]["fm_ratio"])
+            x = fm_a(x)
+            num_frames_down = x.shape[1]
+            x = x.reshape(batch_size * num_frames_down, seq_length, channels)
+            _, tm_a, tm_c, tm_m, _, tu_a, tu_c, tu_m = compute_merge(x, self._tome_info, self._tome_info["args"]["tm_ratio"])
+            
+            x = orig_x
             
             norm_x = self.norm1(x)
             skip_x = x
@@ -512,6 +519,7 @@ def apply_patch(
      - merge_mlp: Whether or not to merge tokens for the mlp layers (very not recommended).
     """
 
+    print(f"fm ratio:{fm_ratio}, tm ratio:{tm_ratio}, bm_ratio:{bm_ratio}")
     # Make sure the module is not currently patched
     remove_patch(model)
 
@@ -549,29 +557,39 @@ def apply_patch(
         }
     }
     hook_tome_model(diffusion_model)
+    
+    exclude_names = [
+        # "input_blocks.1.1.transformer_blocks",
+        # "input_blocks.2.1.transformer_blocks",
+        "output_blocks.9.1.transformer_blocks",
+        "output_blocks.10.1.transformer_blocks",
+        "output_blocks.11.1.transformer_blocks",
+    ]
 
-    for _, module in diffusion_model.named_modules():
+    for name, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
-        if isinstance_str(module, "BasicTransformerBlock"):
-            # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
-            if is_diffusers:
-                make_tome_block_fn = make_diffusers_tome_block
-            elif is_openai_wrapper:
-                # print("Patching BasicTransformer module in the UNet")
-                make_tome_block_fn = make_generative_models_tome_block
-            else:
-                make_tome_block_fn = make_tome_block
-            module.__class__ = make_tome_block_fn(module.__class__)
-            module._tome_info = diffusion_model._tome_info
+        # if name contains any of the exclude_names, skip
+        if not any([exclude_name in name for exclude_name in exclude_names]):
+            if isinstance_str(module, "BasicTransformerBlock"):
+                # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+                if is_diffusers:
+                    make_tome_block_fn = make_diffusers_tome_block
+                elif is_openai_wrapper:
+                    # print("Patching BasicTransformer module in the UNet")
+                    make_tome_block_fn = make_generative_models_tome_block
+                else:
+                    make_tome_block_fn = make_tome_block
+                module.__class__ = make_tome_block_fn(module.__class__)
+                module._tome_info = diffusion_model._tome_info
 
-            # Something introduced in SD 2.0 (LDM only)
-            if not hasattr(module, "disable_self_attn") and not is_diffusers:
-                module.disable_self_attn = False
+                # Something introduced in SD 2.0 (LDM only)
+                if not hasattr(module, "disable_self_attn") and not is_diffusers:
+                    module.disable_self_attn = False
 
-            # Something needed for older versions of diffusers
-            if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
-                module.use_ada_layer_norm = False
-                module.use_ada_layer_norm_zero = False
+                # Something needed for older versions of diffusers
+                if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
+                    module.use_ada_layer_norm = False
+                    module.use_ada_layer_norm_zero = False
 
         elif isinstance_str(module, "VideoTransformerBlock"):
             # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
@@ -595,6 +613,7 @@ def apply_patch(
                 module.use_ada_layer_norm = False
                 module.use_ada_layer_norm_zero = False
 
+    print("Done patching")
     return model
 
 
