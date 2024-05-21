@@ -569,8 +569,8 @@ def apply_patch(
     for name, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
         # if name contains any of the exclude_names, skip
-        if not any([exclude_name in name for exclude_name in exclude_names]):
-            if isinstance_str(module, "BasicTransformerBlock"):
+        if isinstance_str(module, "BasicTransformerBlock"):
+            if not any([exclude_name in name for exclude_name in exclude_names]):
                 # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
                 if is_diffusers:
                     make_tome_block_fn = make_diffusers_tome_block
@@ -590,6 +590,28 @@ def apply_patch(
                 if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
                     module.use_ada_layer_norm = False
                     module.use_ada_layer_norm_zero = False
+            else:
+                if isinstance_str(module, "BasicTransformerBlock"):
+                    # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+                    if is_diffusers:
+                        make_tome_block_fn = make_diffusers_tome_block
+                    elif is_openai_wrapper:
+                        # print("Patching BasicTransformer module in the UNet")
+                        make_tome_block_fn = make_generative_models_tome_block
+                    else:
+                        make_tome_block_fn = make_tome_block
+                    module.__class__ = make_tome_block_fn(module.__class__)
+                    module._tome_info = diffusion_model._tome_info
+                    module._tome_info["args"]["fm_ratio"] = 0.0
+
+                    # Something introduced in SD 2.0 (LDM only)
+                    if not hasattr(module, "disable_self_attn") and not is_diffusers:
+                        module.disable_self_attn = False
+
+                    # Something needed for older versions of diffusers
+                    if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
+                        module.use_ada_layer_norm = False
+                        module.use_ada_layer_norm_zero = False
 
         elif isinstance_str(module, "VideoTransformerBlock"):
             # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
