@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import math
 from typing import Type, Dict, Any, Tuple, Callable
 from einops import rearrange, repeat
+import copy
 
 from . import merge
 from .utils import isinstance_str, init_generator
@@ -47,6 +48,7 @@ def compute_merge_temp(x: torch.Tensor, tome_info: Dict[str, Any], ratio: float)
     original_t = tome_info["num_frames"]
     original_tokens = original_t
     downsample = original_tokens // x.shape[1]
+    # print(f"In compute temp: original tokens {original_tokens}, downsample {downsample}")
 
     args = tome_info["args"]
 
@@ -237,8 +239,13 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
             
             orig_x = x
             x = x.reshape(batch_size, num_frames, seq_length * channels)
+            # print("-"*50)
+            # print(f"fm_ratio: {self._tome_info['args']['fm_ratio']}")
+            # print(f"Before frame_temp {x.shape}")
             fm_a, fm_c, fm_m, fu_a, fu_c, fu_m = compute_merge_temp(x, self._tome_info, self._tome_info["args"]["fm_ratio"])
             x = fm_a(x)
+            # print(f"After computing frame merge {x.shape}")
+            # print("-"*50)
             num_frames_down = x.shape[1]
             x = x.reshape(batch_size * num_frames_down, seq_length, channels)
             _, tm_a, tm_c, tm_m, _, tu_a, tu_c, tu_m = compute_merge(x, self._tome_info, self._tome_info["args"]["tm_ratio"])
@@ -256,7 +263,9 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
 
             norm_x = norm_x.reshape(batch_size, num_frames, seq_length * channels)
             # print("tome block shape before frame merge ", norm_x.shape)
+            # print(norm_x.shape)
             norm_x = fm(norm_x)
+            # print(norm_x.shape)
             # print("tome block shape after frame merge ", norm_x.shape)
             num_frames_down = norm_x.shape[1]
             norm_x = norm_x.reshape(batch_size * num_frames_down, seq_length, channels)
@@ -268,7 +277,10 @@ def make_generative_models_tome_block(block_class: Type[torch.nn.Module]) -> Typ
                 tm, tu = tm_a, tu_a
 
             # print("tome block shape before token merge ", norm_x.shape)
+            # print("-"*50)
+            # print(f"Before token merge {norm_x.shape}")
             norm_x = tm(norm_x)
+            # print(f"After token merge {norm_x.shape}")
             # print("tome block shape after token merge ", norm_x.shape)
             
             x = self.attn1(
@@ -539,7 +551,7 @@ def apply_patch(
         diffusion_model = model.unet if hasattr(model, "unet") else model
 
     diffusion_model._tome_info = {
-        "size": None,
+        "size": (72, 72), # TODO: should not be hardcoded,
         "num_frames": num_frames,
         "hooks": [],
         "args": {
@@ -602,8 +614,8 @@ def apply_patch(
                 else:
                     make_tome_block_fn = make_tome_block
                 module.__class__ = make_tome_block_fn(module.__class__)
-                module._tome_info = diffusion_model._tome_info
-                module._tome_info["args"]["fm_ratio"] = 0.0
+                module._tome_info = copy.deepcopy(diffusion_model._tome_info)
+                module._tome_info["args"]["fm_ratio"] = 0
 
                 # Something introduced in SD 2.0 (LDM only)
                 if not hasattr(module, "disable_self_attn") and not is_diffusers:
@@ -624,7 +636,7 @@ def apply_patch(
             else:
                 make_tome_block_fn = make_tome_block
             module.__class__ = make_tome_block_fn(module.__class__)
-            module._tome_info = diffusion_model._tome_info
+            module._tome_info = copy.deepcopy(diffusion_model._tome_info)
             module._tome_info["args"]["merge_mlp"] = True
 
             # Something introduced in SD 2.0 (LDM only)
