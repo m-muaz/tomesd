@@ -561,8 +561,8 @@ def apply_patch(
     exclude_names = [
         # "input_blocks.1.1.transformer_blocks",
         # "input_blocks.2.1.transformer_blocks",
-        "output_blocks.9.1.transformer_blocks",
-        "output_blocks.10.1.transformer_blocks",
+        # "output_blocks.9.1.transformer_blocks",
+        # "output_blocks.10.1.transformer_blocks",
         "output_blocks.11.1.transformer_blocks",
     ]
 
@@ -571,6 +571,7 @@ def apply_patch(
         # if name contains any of the exclude_names, skip
         if isinstance_str(module, "BasicTransformerBlock"):
             if not any([exclude_name in name for exclude_name in exclude_names]):
+                print(f"{name} with non zero fm")
                 # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
                 if is_diffusers:
                     make_tome_block_fn = make_diffusers_tome_block
@@ -591,27 +592,27 @@ def apply_patch(
                     module.use_ada_layer_norm = False
                     module.use_ada_layer_norm_zero = False
             else:
-                if isinstance_str(module, "BasicTransformerBlock"):
-                    # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
-                    if is_diffusers:
-                        make_tome_block_fn = make_diffusers_tome_block
-                    elif is_openai_wrapper:
-                        # print("Patching BasicTransformer module in the UNet")
-                        make_tome_block_fn = make_generative_models_tome_block
-                    else:
-                        make_tome_block_fn = make_tome_block
-                    module.__class__ = make_tome_block_fn(module.__class__)
-                    module._tome_info = diffusion_model._tome_info
-                    module._tome_info["args"]["fm_ratio"] = 0.0
+                print(f"{name} with 0 fm")
+                # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+                if is_diffusers:
+                    make_tome_block_fn = make_diffusers_tome_block
+                elif is_openai_wrapper:
+                    # print("Patching BasicTransformer module in the UNet")
+                    make_tome_block_fn = make_generative_models_tome_block
+                else:
+                    make_tome_block_fn = make_tome_block
+                module.__class__ = make_tome_block_fn(module.__class__)
+                module._tome_info = diffusion_model._tome_info
+                module._tome_info["args"]["fm_ratio"] = 0.0
 
-                    # Something introduced in SD 2.0 (LDM only)
-                    if not hasattr(module, "disable_self_attn") and not is_diffusers:
-                        module.disable_self_attn = False
+                # Something introduced in SD 2.0 (LDM only)
+                if not hasattr(module, "disable_self_attn") and not is_diffusers:
+                    module.disable_self_attn = False
 
-                    # Something needed for older versions of diffusers
-                    if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
-                        module.use_ada_layer_norm = False
-                        module.use_ada_layer_norm_zero = False
+                # Something needed for older versions of diffusers
+                if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
+                    module.use_ada_layer_norm = False
+                    module.use_ada_layer_norm_zero = False
 
         elif isinstance_str(module, "VideoTransformerBlock"):
             # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
