@@ -400,10 +400,12 @@ def make_generative_models_tome_temp_block(block_class: Type[torch.nn.Module]) -
             
             if self.disable_self_attn:
                 x = x.reshape(b, S, timesteps * C)
+                # print("-"*50)
                 # print("Calling m_c in after ff")
                 # print("shape before ", x.shape)
                 x = m_c(x)
                 # print("shape after ", x.shape)
+                # print("-"*50)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 x = self.attn1(x, context=context.reshape(S, b, 1, -1)[:seq_length_down, :, :, :].flatten(0,1))
@@ -412,10 +414,12 @@ def make_generative_models_tome_temp_block(block_class: Type[torch.nn.Module]) -
                 x = u_c(x).reshape(b * S, timesteps, C) + x_skip
             else:
                 x = x.reshape(b, S, timesteps * C)
+                # print("-"*50)
                 # print("Calling m_a in generative_models_tome_block after norm 1")
                 # print("shape before ", x.shape)
                 x = m_a(x) # size is (batch, seq_length_down, num_frames/timesteps * channels)
                 # print("shape after ", x.shape)
+                # print("-"*50)
                 seq_length_down = x.shape[1]
                 x = x.reshape(b * seq_length_down, timesteps, C)
                 x = self.attn1(x)
@@ -571,10 +575,21 @@ def apply_patch(
     hook_tome_model(diffusion_model)
     
     exclude_names = [
-        # "input_blocks.1.1.transformer_blocks",
-        # "input_blocks.2.1.transformer_blocks",
-        # "output_blocks.9.1.transformer_blocks",
-        # "output_blocks.10.1.transformer_blocks",
+        "input_blocks.1.1.transformer_blocks",
+        "input_blocks.2.1.transformer_blocks",
+        "input_blocks.4.1.transformer_blocks",
+        "input_blocks.5.1.transformer_blocks",
+        "input_blocks.7.1.transformer_blocks",
+        "input_blocks.8.1.transformer_blocks",
+        "middle_block.1.transformer_blocks",
+        "output_blocks.3.1.transformer_blocks",
+        "output_blocks.4.1.transformer_blocks",
+        "output_blocks.5.1.transformer_blocks",
+        "output_blocks.6.1.transformer_blocks",
+        "output_blocks.7.1.transformer_blocks",
+        "output_blocks.8.1.transformer_blocks",
+        "output_blocks.9.1.transformer_blocks",
+        "output_blocks.10.1.transformer_blocks",
         "output_blocks.11.1.transformer_blocks",
     ]
 
@@ -582,8 +597,7 @@ def apply_patch(
         # If for some reason this has a different name, create an issue and I'll fix it
         # if name contains any of the exclude_names, skip
         if isinstance_str(module, "BasicTransformerBlock"):
-            if not any([exclude_name in name for exclude_name in exclude_names]):
-                print(f"{name} with non zero fm")
+            if any([exclude_name in name for exclude_name in exclude_names]): 
                 # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
                 if is_diffusers:
                     make_tome_block_fn = make_diffusers_tome_block
@@ -594,6 +608,7 @@ def apply_patch(
                     make_tome_block_fn = make_tome_block
                 module.__class__ = make_tome_block_fn(module.__class__)
                 module._tome_info = diffusion_model._tome_info
+                print(f"{name} using fm ratio {module._tome_info['args']['fm_ratio']}")
 
                 # Something introduced in SD 2.0 (LDM only)
                 if not hasattr(module, "disable_self_attn") and not is_diffusers:
@@ -604,7 +619,6 @@ def apply_patch(
                     module.use_ada_layer_norm = False
                     module.use_ada_layer_norm_zero = False
             else:
-                print(f"{name} with 0 fm")
                 # make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
                 if is_diffusers:
                     make_tome_block_fn = make_diffusers_tome_block
@@ -615,7 +629,8 @@ def apply_patch(
                     make_tome_block_fn = make_tome_block
                 module.__class__ = make_tome_block_fn(module.__class__)
                 module._tome_info = copy.deepcopy(diffusion_model._tome_info)
-                module._tome_info["args"]["fm_ratio"] = 0
+                module._tome_info["args"]["fm_ratio"] = 0.0
+                print(f"{name} using fm ratio {module._tome_info['args']['fm_ratio']}")
 
                 # Something introduced in SD 2.0 (LDM only)
                 if not hasattr(module, "disable_self_attn") and not is_diffusers:
