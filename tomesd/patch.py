@@ -1,6 +1,6 @@
 import torch
 import math
-from typing import Type, Dict, Any, Tuple, Callable
+from typing import Type, Dict, Any, Tuple, Callable, Optional
 
 from . import merge
 from .utils import isinstance_str, init_generator
@@ -158,6 +158,70 @@ def make_diffusers_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.
 
     return ToMeBlock
 
+def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]:
+    """
+    Make a patched class for Navit (Siglip) model.
+    This patch applies ToMe to the forward function of the block.
+    """
+    class ToMeBlock(block_class):
+        # Save for unpatching later
+        _parent = block_class
+
+        def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: torch.Tensor,
+            output_attentions: Optional[bool] = False,
+        ) -> Tuple[torch.FloatTensor]:
+            # print("in tomeblock")
+            # (1) ToMe
+            m_a, _, m_m, u_a, _, u_m = compute_merge(hidden_states, self._tome_info)
+            
+            residual = hidden_states
+
+            hidden_states = self.layer_norm1(hidden_states)
+            
+            # (2) ToMe m_a
+            # print("size before m_a", hidden_states.shape[1])
+            hidden_states = m_a(hidden_states)
+            # print("size after m_a", hidden_states.shape[1])
+
+            
+            # 1. Self-Attention
+            hidden_states, attn_weights = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+            )
+            # (3) ToMe u_a
+            # print("size before u_a", hidden_states.shape[1])
+            hidden_states = u_a(hidden_states) + residual
+            # print("size after u_a", hidden_states.shape[1])
+
+            residual = hidden_states
+            # 2. Feed-forward
+            hidden_states = self.layer_norm2(hidden_states)
+            
+            # (4). ToMe m_m
+            hidden_states = m_m(hidden_states)
+            
+            hidden_states = self.mlp(hidden_states)
+            
+            # (5). ToMe u_m
+            hidden_states = u_m(hidden_states) + residual
+
+            outputs = (hidden_states,)
+
+            if output_attentions:
+                outputs += (attn_weights,)
+
+            return outputs
+
+    return ToMeBlock
+
+
+
+
 
 
 
@@ -215,17 +279,30 @@ def apply_patch(
 
     is_diffusers = isinstance_str(model, "DiffusionPipeline") or isinstance_str(model, "ModelMixin")
 
-    if not is_diffusers:
-        if not hasattr(model, "model") or not hasattr(model.model, "diffusion_model"):
-            # Provided model not supported
-            raise RuntimeError("Provided model was not a Stable Diffusion / Latent Diffusion model, as expected.")
-        diffusion_model = model.model.diffusion_model
+    diffusion_model = None
+    if isinstance_str(model, "SiglipVisionModel"):
+        diffusion_model = model.vision_model.encoder
+    elif isinstance_str(model, "SiglipVisionTransformer"):
+        diffusion_model = model.encoder
+    elif isinstance_str(model, "SiglipEncoder"):
+        diffusion_model = model
     else:
-        # Supports "pipe.unet" and "unet"
-        diffusion_model = model.unet if hasattr(model, "unet") else model
+        print("ViT model not detected or not supported")
+    
+    # if not is_diffusers and (diffusion_model is None):
+    #     if not hasattr(model, "model") or not hasattr(model.model, "diffusion_model"):
+    #         # Provided model not supported
+    #         raise RuntimeError("Provided model was not a Stable Diffusion / Latent Diffusion model, as expected.")
+    #     diffusion_model = model.model.diffusion_model
+    # else:
+    #     # Supports "pipe.unet" and "unet"
+    #     diffusion_model = model.unet if hasattr(model, "unet") else model
 
+    # NaVit-Siglip specific values
+    IMAGE_SIZE, PATCH_SIZE= 980, 14 
+    
     diffusion_model._tome_info = {
-        "size": None,
+        "size": (IMAGE_SIZE//PATCH_SIZE, IMAGE_SIZE//PATCH_SIZE), # Hardcoded values
         "hooks": [],
         "args": {
             "ratio": ratio,
@@ -238,12 +315,15 @@ def apply_patch(
             "merge_mlp": merge_mlp
         }
     }
-    hook_tome_model(diffusion_model)
+    # hook_tome_model(diffusion_model)
+    
 
-    for _, module in diffusion_model.named_modules():
+    for name, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
-        if isinstance_str(module, "BasicTransformerBlock"):
-            make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
+        if isinstance_str(module, "SiglipEncoderLayer"):
+            print("Layer name ", name, " with ratio ", ratio, " with merge attn|ffn", merge_attn,"|", merge_mlp)
+            # print("Name of layer being hooked : ", name)
+            make_tome_block_fn = make_navit_tome_block
             module.__class__ = make_tome_block_fn(module.__class__)
             module._tome_info = diffusion_model._tome_info
 
