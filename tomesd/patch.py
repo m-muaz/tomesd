@@ -1,5 +1,6 @@
 import torch
 import math
+import time
 from typing import Type, Dict, Any, Tuple, Callable, Optional
 
 from . import merge
@@ -173,7 +174,6 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
             attention_mask: torch.Tensor,
             output_attentions: Optional[bool] = False,
         ) -> Tuple[torch.FloatTensor]:
-            
             profiler_outputs = {}
             
             start = torch.cuda.Event(enable_timing=True)
@@ -192,12 +192,12 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
                 return result
             
             # print("in tomeblock")
-            # (1) ToMe
-            m_a, _, m_m, u_a, _, u_m = measure_cuda_time("compute_merge", compute_merge, hidden_states, self._tome_info)
-            
             residual = hidden_states
 
             hidden_states = measure_cuda_time("layer_norm1", self.layer_norm1, hidden_states)
+            
+            # (1) ToMe
+            m_a, _, m_m, u_a, _, u_m = measure_cuda_time("compute_merge", compute_merge, hidden_states, self._tome_info)
             
             # (2) ToMe m_a
             # print("size before m_a", hidden_states.shape[1])
@@ -218,7 +218,7 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
             hidden_states = measure_cuda_time(
                 "unmerge_attn",
                 u_a, hidden_states) + residual
-                
+            
             # print("size after u_a", hidden_states.shape[1])
 
             residual = hidden_states
@@ -237,6 +237,7 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
             # (5). ToMe u_m
             hidden_states = measure_cuda_time("unmerge_mlp", 
                                             u_m, hidden_states) + residual
+            # hidden_states = hidden_states + residual
 
         
             print(profiler_outputs)
@@ -244,7 +245,7 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
 
             if output_attentions:
                 outputs += (attn_weights,)
-
+            
             return outputs, profiler_outputs
 
     return ToMeBlock
