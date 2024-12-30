@@ -173,49 +173,79 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
             attention_mask: torch.Tensor,
             output_attentions: Optional[bool] = False,
         ) -> Tuple[torch.FloatTensor]:
+            
+            profiler_outputs = {}
+            
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            
+            def measure_cuda_time(name, func, *args, **kwargs):
+                # start = torch.cuda.Event(enable_timing=True)
+                # end = torch.cuda.Event(enable_timing=True)
+                torch.cuda.synchronize()
+                start.record()
+                result = func(*args, **kwargs)
+                end.record()
+                torch.cuda.synchronize()
+                cuda_time = start.elapsed_time(end)
+                profiler_outputs[name] = cuda_time
+                return result
+            
             # print("in tomeblock")
             # (1) ToMe
-            m_a, _, m_m, u_a, _, u_m = compute_merge(hidden_states, self._tome_info)
+            m_a, _, m_m, u_a, _, u_m = measure_cuda_time("compute_merge", compute_merge, hidden_states, self._tome_info)
             
             residual = hidden_states
 
-            hidden_states = self.layer_norm1(hidden_states)
+            hidden_states = measure_cuda_time("layer_norm1", self.layer_norm1, hidden_states)
             
             # (2) ToMe m_a
             # print("size before m_a", hidden_states.shape[1])
-            hidden_states = m_a(hidden_states)
+            hidden_states = measure_cuda_time("merge_attn", m_a, hidden_states)
             # print("size after m_a", hidden_states.shape[1])
 
             
             # 1. Self-Attention
-            hidden_states, attn_weights = self.self_attn(
+            hidden_states, attn_weights = measure_cuda_time(
+                "self_attn",
+                self.self_attn,
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 output_attentions=output_attentions,
             )
             # (3) ToMe u_a
             # print("size before u_a", hidden_states.shape[1])
-            hidden_states = u_a(hidden_states) + residual
+            hidden_states = measure_cuda_time(
+                "unmerge_attn",
+                u_a, hidden_states) + residual
+                
             # print("size after u_a", hidden_states.shape[1])
 
             residual = hidden_states
             # 2. Feed-forward
-            hidden_states = self.layer_norm2(hidden_states)
+            hidden_states = measure_cuda_time("layer_norm2",
+                self.layer_norm2, hidden_states)
             
             # (4). ToMe m_m
-            hidden_states = m_m(hidden_states)
+            hidden_states = measure_cuda_time(
+                "merge_mlp",
+                m_m, hidden_states)
             
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = measure_cuda_time(
+                "mlp", self.mlp, hidden_states)
             
             # (5). ToMe u_m
-            hidden_states = u_m(hidden_states) + residual
+            hidden_states = measure_cuda_time("unmerge_mlp", 
+                                            u_m, hidden_states) + residual
 
+        
+            print(profiler_outputs)
             outputs = (hidden_states,)
 
             if output_attentions:
                 outputs += (attn_weights,)
 
-            return outputs
+            return outputs, profiler_outputs
 
     return ToMeBlock
 
