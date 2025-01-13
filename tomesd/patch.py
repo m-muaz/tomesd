@@ -844,10 +844,10 @@ def apply_patch(
     # ]
     
     include_names_gp1 = [
-        "transformer_blocks.0",
-        "transformer_blocks.1",
-        "transformer_blocks.2",
-        "transformer_blocks.3",
+        # "transformer_blocks.0",
+        # "transformer_blocks.1",
+        # "transformer_blocks.2",
+        # "transformer_blocks.3",
         "transformer_blocks.4",
         "transformer_blocks.5",
         "transformer_blocks.6",
@@ -864,10 +864,10 @@ def apply_patch(
         "transformer_blocks.17",
         "transformer_blocks.18",
         "transformer_blocks.19",
-        "transformer_blocks.20",
-        "transformer_blocks.21",
-        "transformer_blocks.22",
-        "transformer_blocks.23",
+        # "transformer_blocks.20",
+        # "transformer_blocks.21",
+        # "transformer_blocks.22",
+        # "transformer_blocks.23",
         ]
 
     for name, module in diffusion_model.named_modules():
