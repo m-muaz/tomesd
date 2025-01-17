@@ -2,6 +2,7 @@ import torch
 import math
 import time
 from typing import Type, Dict, Any, Tuple, Callable, Optional
+import numpy as np
 
 from . import merge
 from .utils import isinstance_str, init_generator
@@ -164,7 +165,7 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
     Make a patched class for Navit (Siglip) model.
     This patch applies ToMe to the forward function of the block.
     """
-    class ToMeBlock(block_class):
+    class DbolyaToMeBlock(block_class):
         # Save for unpatching later
         _parent = block_class
 
@@ -176,19 +177,19 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
         ) -> Tuple[torch.FloatTensor]:
             profiler_outputs = {}
             
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
+            # start = torch.cuda.Event(enable_timing=True)
+            # end = torch.cuda.Event(enable_timing=True)
             
             def measure_cuda_time(name, func, *args, **kwargs):
                 # start = torch.cuda.Event(enable_timing=True)
                 # end = torch.cuda.Event(enable_timing=True)
-                torch.cuda.synchronize()
-                start.record()
+                # torch.cuda.synchronize()
+                # start.record()
                 result = func(*args, **kwargs)
-                end.record()
-                torch.cuda.synchronize()
-                cuda_time = start.elapsed_time(end)
-                profiler_outputs[name] = cuda_time
+                # end.record()
+                # torch.cuda.synchronize()
+                # cuda_time = start.elapsed_time(end)
+                # profiler_outputs[name] = cuda_time
                 return result
             
             # print("in tomeblock")
@@ -240,7 +241,7 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
             # hidden_states = hidden_states + residual
 
         
-            print(profiler_outputs)
+            # print(profiler_outputs)
             outputs = (hidden_states,)
 
             if output_attentions:
@@ -248,7 +249,7 @@ def make_navit_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.M
             
             return outputs, profiler_outputs
 
-    return ToMeBlock
+    return DbolyaToMeBlock
 
 
 
@@ -348,24 +349,27 @@ def apply_patch(
     }
     # hook_tome_model(diffusion_model)
     
+    include_names_gp1 = ['layers.'+str(x) for x in np.arange(0, 27).tolist()]
 
+    print("Applying patch")
     for name, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
         if isinstance_str(module, "SiglipEncoderLayer"):
-            print("Layer name ", name, " with ratio ", ratio, " with merge attn|ffn", merge_attn,"|", merge_mlp)
-            # print("Name of layer being hooked : ", name)
-            make_tome_block_fn = make_navit_tome_block
-            module.__class__ = make_tome_block_fn(module.__class__)
-            module._tome_info = diffusion_model._tome_info
+            if any([include_name == name for include_name in list(include_names_gp1)]):
+                print("Layer name ", name, " with ratio ", ratio, " with merge attn|ffn", merge_attn,"|", merge_mlp)
+                # print("Name of layer being hooked : ", name)
+                make_tome_block_fn = make_navit_tome_block
+                module.__class__ = make_tome_block_fn(module.__class__)
+                module._tome_info = diffusion_model._tome_info
 
-            # Something introduced in SD 2.0 (LDM only)
-            if not hasattr(module, "disable_self_attn") and not is_diffusers:
-                module.disable_self_attn = False
+                # Something introduced in SD 2.0 (LDM only)
+                if not hasattr(module, "disable_self_attn") and not is_diffusers:
+                    module.disable_self_attn = False
 
-            # Something needed for older versions of diffusers
-            if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
-                module.use_ada_layer_norm = False
-                module.use_ada_layer_norm_zero = False
+                # Something needed for older versions of diffusers
+                if not hasattr(module, "use_ada_layer_norm_zero") and is_diffusers:
+                    module.use_ada_layer_norm = False
+                    module.use_ada_layer_norm_zero = False
 
     return model
 
